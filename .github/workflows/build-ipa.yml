@@ -1,0 +1,85 @@
+name: Build WindowsiOS IPA
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out WindowsiOS
+        uses: actions/checkout@v4
+        with:
+          path: WindowsiOS
+
+      - name: Check out Husk (libslirp patch)
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: Husk
+
+      - name: Install build tools
+        run: |
+          set -euxo pipefail
+          brew install xcodegen meson ninja pkg-config python3
+          if [ ! -x /opt/homebrew/bin/python3 ]; then
+            ln -sf "$(command -v python3)" /opt/homebrew/bin/python3
+          fi
+
+      - name: Build iOS static dependencies (libffi, glib, libslirp)
+        working-directory: WindowsiOS
+        run: |
+          set -euxo pipefail
+          export HUSK_REF="${GITHUB_WORKSPACE}/Husk"
+          if ! bash scripts/build_ios_deps.sh; then
+            for f in work/ios_deps_build/*.log; do
+              echo "=== $f ==="
+              tail -n 60 "$f" || true
+            done
+            exit 1
+          fi
+
+      - name: Build libwinvm.a
+        working-directory: WindowsiOS
+        run: |
+          set -euxo pipefail
+          make ios-lib
+
+      - name: Generate Xcode project and build unsigned WindowsiOS.ipa
+        working-directory: WindowsiOS
+        run: |
+          set -euxo pipefail
+          cd ios
+          xcodegen generate
+          xcodebuild \
+            -project WindowsiOS.xcodeproj \
+            -scheme WindowsiOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            -derivedDataPath ../build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+          APP_PATH="../build/DerivedData/Build/Products/Release-iphoneos/WindowsiOS.app"
+          test -d "$APP_PATH"
+          mkdir -p ../build/ipa/Payload
+          cp -R "$APP_PATH" ../build/ipa/Payload/
+          cd ../build/ipa
+          zip -qry ../../WindowsiOS.ipa Payload
+          ls -lh ../../WindowsiOS.ipa
+
+      - name: Upload WindowsiOS.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsiOS-ipa
+          path: WindowsiOS/WindowsiOS.ipa
+          if-no-files-found: error
